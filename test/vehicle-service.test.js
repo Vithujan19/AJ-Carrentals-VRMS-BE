@@ -86,6 +86,41 @@ describe('vehicle mileage recording', () => {
   });
 });
 
+describe('vehicle audit history', () => {
+  it('orders and returns audit events by their recorded occurrence time', async () => {
+    const event = {
+      id: 'audit-id',
+      occurredAt: new Date('2026-01-02T03:04:05Z'),
+      action: 'vehicle.updated',
+    };
+    const findMany = vi.fn().mockResolvedValue([event]);
+    const count = vi.fn().mockResolvedValue(1);
+    const prisma = {
+      vehicle: { findUnique: vi.fn().mockResolvedValue({ id: 'vehicle-id' }) },
+      auditLog: { findMany, count },
+      $transaction: vi.fn((operations) => Promise.all(operations)),
+    };
+    const service = createVehicleService({ prisma, config: {}, storage: {} });
+
+    const result = await service.auditHistory({
+      id: 'vehicle-id',
+      page: 2,
+      limit: 10,
+      actor: { id: 'staff-id' },
+      permissions: ['vehicles.view', 'vehicles.audit.view'],
+    });
+
+    expect(findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { entityId: 'vehicle-id', entityType: 'Vehicle' },
+      orderBy: [{ occurredAt: 'desc' }, { id: 'desc' }],
+      skip: 10,
+      take: 10,
+    }));
+    expect(count).toHaveBeenCalledWith({ where: { entityId: 'vehicle-id', entityType: 'Vehicle' } });
+    expect(result.items).toEqual([event]);
+  });
+});
+
 describe('vehicle availability period filtering', () => {
   it('uses a half-open interval for booking and operational block conflicts', async () => {
     const findMany = vi.fn().mockResolvedValue([]);
@@ -121,6 +156,60 @@ describe('vehicle availability period filtering', () => {
     });
     expect(availability.AND[1].availabilityBlocks.none.startsAt).toEqual({
       lt: new Date('2027-01-03T04:30:00.000Z'),
+    });
+  });
+
+  describe('public vehicle catalogue', () => {
+    const vehicle = {
+      id: 'vehicle-id',
+      publicDescription: 'A public description',
+      internalNotes: 'private',
+      vin: 'private',
+      specification: { make: 'Toyota', model: 'Corolla' },
+      images: [{ id: 'image-id', caption: 'Front' }],
+      rates: [],
+    };
+
+    it('lists only active, published, unarchived vehicles without date or rate restrictions', async () => {
+      const findMany = vi.fn().mockResolvedValue([vehicle]);
+      const count = vi.fn().mockResolvedValue(1);
+      const prisma = {
+        vehicle: { findMany, count },
+        $transaction: vi.fn((operations) => Promise.all(operations)),
+      };
+      const service = createVehicleService({ prisma, config: {}, storage: {} });
+      const result = await service.publicList({ query: { page: 2, limit: 12, search: 'Toyota', seatingCapacity: 4 } });
+      const request = findMany.mock.calls[0][0];
+      expect(request.where).toEqual({
+        isPublished: true,
+        status: 'ACTIVE',
+        archivedAt: null,
+        specification: { is: { seatingCapacity: { gte: 4 }, OR: [{ make: { contains: 'Toyota' } }, { model: { contains: 'Toyota' } }] } },
+      });
+      expect(count).toHaveBeenCalledWith({ where: request.where });
+      expect(request.skip).toBe(12);
+      expect(request.select.images.where).toEqual({ archivedAt: null, isPublished: true });
+      expect(request.select).not.toHaveProperty('vin');
+      expect(request.select).not.toHaveProperty('internalNotes');
+      expect(request.select).not.toHaveProperty('documents');
+      expect(result.items[0]).toEqual({
+        id: 'vehicle-id',
+        description: 'A public description',
+        specification: { make: 'Toyota', model: 'Corolla' },
+        images: [{ id: 'image-id', caption: 'Front', url: '/api/v1/public/vehicles/vehicle-id/images/image-id' }],
+        rates: [],
+      });
+      expect(result.pagination).toEqual({ page: 2, limit: 12, total: 1, pages: 1 });
+    });
+
+    it('uses the same publication boundary for details and returns 404 when not visible', async () => {
+      const findFirst = vi.fn().mockResolvedValue(null);
+      const service = createVehicleService({ prisma: { vehicle: { findFirst } }, config: {}, storage: {} });
+      await expect(service.publicDetail({ id: 'vehicle-id' }))
+        .rejects.toMatchObject({ status: 404, code: 'VEHICLE_NOT_FOUND' });
+      expect(findFirst.mock.calls[0][0].where).toEqual({
+        id: 'vehicle-id', isPublished: true, status: 'ACTIVE', archivedAt: null,
+      });
     });
   });
 });

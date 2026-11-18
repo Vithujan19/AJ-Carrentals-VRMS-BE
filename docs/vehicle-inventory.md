@@ -50,7 +50,9 @@ The fleet API is mounted at `/api/v1`; existing authentication APIs remain under
 | `GET /vehicles/:id/maintenance-history`, `GET /vehicles/:id/booking-history`, `GET /vehicles/:id/audit-history` | Read-only, paginated operational history; each requires its specific backend permission. |
 | `GET/POST /rental-packages`, `PATCH /rental-packages/:packageId` | View/manage reusable rental packages. Packages are deactivated, not deleted. |
 | `GET/POST /vehicles/:id/rates`, `PATCH /vehicles/:id/rates/:rateId` | View/manage effective-dated vehicle rental rates. Rates are deactivated, not deleted. |
-| `GET /public/vehicles/:vehicleId/images/:imageId` | Unauthenticated image delivery for an active vehicle only, and only while the image is explicitly published. |
+| `GET /public/vehicles` | Paginated public catalogue of active, unarchived, published vehicles, with optional make/model search, category, fuel, transmission and minimum-seat filters. This is not a date availability search. |
+| `GET /public/vehicles/:id` | Public details for an active, unarchived, published vehicle. Only public descriptions, selected specifications, published images and currently effective active rates are returned. |
+| `GET /public/vehicles/:vehicleId/images/:imageId` | Unauthenticated cross-origin image delivery only for published images of an active, unarchived, published vehicle. |
 
 Every mutating route requires the existing session and CSRF protections plus the module-specific backend permission. The frontend hides unauthorized controls but is not an authorization boundary.
 

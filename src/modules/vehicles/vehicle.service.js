@@ -561,8 +561,111 @@ function translateVehicleUniqueError(error) {
   throw error;
 }
 
+function publicVehicleSelect(now) {
+  return {
+    id: true,
+    publicDescription: true,
+    specification: {
+      select: {
+        make: true, model: true, variant: true, category: true, manufacturingYear: true,
+        fuelType: true, transmission: true, seatingCapacity: true, numberOfDoors: true,
+        hasAirConditioning: true, features: true,
+      },
+    },
+    images: {
+      where: { archivedAt: null, isPublished: true },
+      select: { id: true, caption: true },
+      orderBy: [{ isPrimary: 'desc' }, { sortOrder: 'asc' }, { id: 'asc' }],
+    },
+    rates: {
+      where: {
+        isActive: true,
+        effectiveFrom: { lte: now },
+        OR: [{ effectiveTo: null }, { effectiveTo: { gt: now } }],
+        rentalPackage: { isActive: true },
+      },
+      select: {
+        id: true, currency: true, rentalPrice: true, includedMileageKm: true,
+        additionalKmRate: true, securityDeposit: true,
+        rentalPackage: {
+          select: { id: true, name: true, rentalPeriod: true, durationCount: true, conditions: true },
+        },
+      },
+      orderBy: [{ rentalPrice: 'asc' }, { id: 'asc' }],
+    },
+  };
+}
+
+function publicVehicle(vehicle) {
+  return {
+    id: vehicle.id,
+    description: vehicle.publicDescription,
+    specification: vehicle.specification,
+    images: vehicle.images.map((image) => ({
+      id: image.id,
+      caption: image.caption,
+      url: `/api/v1/public/vehicles/${vehicle.id}/images/${image.id}`,
+    })),
+    rates: vehicle.rates.map((rate) => ({
+      id: rate.id,
+      currency: rate.currency,
+      rentalPrice: rate.rentalPrice.toString(),
+      includedMileageKm: rate.includedMileageKm,
+      additionalKmRate: rate.additionalKmRate.toString(),
+      securityDeposit: rate.securityDeposit.toString(),
+      package: rate.rentalPackage,
+    })),
+  };
+}
+
 export function createVehicleService({ prisma, config, storage }) {
   return {
+    async publicList({ query }) {
+      const { page, limit, search, category, fuelType, transmission, seatingCapacity } = query;
+      const where = {
+        isPublished: true,
+        status: 'ACTIVE',
+        archivedAt: null,
+        ...((category || fuelType || transmission || seatingCapacity || search) ? {
+          specification: {
+            is: {
+              ...(category ? { category } : {}),
+              ...(fuelType ? { fuelType } : {}),
+              ...(transmission ? { transmission } : {}),
+              ...(seatingCapacity ? { seatingCapacity: { gte: seatingCapacity } } : {}),
+              ...(search ? {
+                OR: [{ make: { contains: search } }, { model: { contains: search } }],
+              } : {}),
+            },
+          },
+        } : {}),
+      };
+      const [items, total] = await prisma.$transaction([
+        prisma.vehicle.findMany({
+          where,
+          select: publicVehicleSelect(new Date()),
+          orderBy: [{ updatedAt: 'desc' }, { id: 'asc' }],
+          skip: (page - 1) * limit,
+          take: limit,
+        }),
+        prisma.vehicle.count({ where }),
+      ]);
+      return {
+        items: items.map(publicVehicle),
+        pagination: { page, limit, total, pages: Math.ceil(total / limit) },
+      };
+    },
+
+    async publicDetail({ id }) {
+      const vehicle = await prisma.vehicle.findFirst({
+        where: { id, isPublished: true, status: 'ACTIVE', archivedAt: null },
+        select: publicVehicleSelect(new Date()),
+      });
+      if (!vehicle) {
+        throw new AppError(404, 'VEHICLE_NOT_FOUND', 'Vehicle was not found.');
+      }
+      return publicVehicle(vehicle);
+    },
     async list({ query, actor, permissions }) {
       const now = new Date();
       const canViewAll = permissions.includes('vehicles.view');
@@ -1044,7 +1147,7 @@ export function createVehicleService({ prisma, config, storage }) {
         prisma.auditLog.findMany({
           where,
           include: { actor: { select: { id: true, displayName: true, emailNormalized: true } } },
-          orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+          orderBy: [{ occurredAt: 'desc' }, { id: 'desc' }],
           skip: (page - 1) * limit,
           take: limit,
         }),

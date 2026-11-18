@@ -11,6 +11,7 @@ import {
   imageIdSchema,
   mileageCorrectionSchema,
   mileageListSchema,
+  publicVehicleListSchema,
   reorderVehicleImagesSchema,
   updateVehicleDocumentSchema,
   updateVehicleImageSchema,
@@ -434,6 +435,14 @@ export function createVehicleRouter({
 
 export function createPublicVehicleRouter({ vehicleService }) {
   const router = Router();
+  router.get('/vehicles', validate(publicVehicleListSchema), async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    res.json({ data: await vehicleService.publicList({ query: req.validated.query }) });
+  });
+  router.get('/vehicles/:id', validate(vehicleIdSchema), async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    res.json({ data: await vehicleService.publicDetail({ id: req.validated.params.id }) });
+  });
   router.get(
     '/vehicles/:vehicleId/images/:imageId',
     validate(z.object({
@@ -442,6 +451,7 @@ export function createPublicVehicleRouter({ vehicleService }) {
     async (req, res) => {
       const { vehicleId, imageId } = req.params;
       const image = await vehicleService.publicImage({ vehicleId, imageId });
+      res.set('Cross-Origin-Resource-Policy', 'cross-origin');
       sendFile(res, {
         ...image,
         disposition: 'inline',

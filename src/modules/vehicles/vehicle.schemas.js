@@ -62,6 +62,17 @@ const pageFields = {
   limit: z.coerce.number().int().min(1).max(100).default(20),
 };
 
+export const publicVehicleListSchema = z.object({
+  query: z.object({
+    ...pageFields,
+    search: z.string().trim().max(100).optional(),
+    category: vehicleCategory.optional(),
+    fuelType: fuelType.optional(),
+    transmission: transmission.optional(),
+    seatingCapacity: z.coerce.number().int().min(1).max(255).optional(),
+  }),
+});
+
 export const vehicleListSchema = z.object({
   query: z.object({
     ...pageFields,
