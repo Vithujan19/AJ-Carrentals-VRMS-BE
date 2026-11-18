@@ -83,3 +83,11 @@ Migration status depends on the target database; use `npx prisma migrate status`
 - `npm run prisma:generate`
 
 `prisma:generate` generates local client code only; it does not alter a database. Customer and booking functionality is implemented in application source, including rental handover, return, and financial close-out workflows. Maintenance and expense write workflows remain outside the current implementation.
+
+## GitHub Actions
+
+The workflow in `.github/workflows/deploy.yml` validates on Node 22 and 24
+and can upload a source-only package over FTPS after approval. Installation,
+Prisma generation, migrations, restart and health checks must be performed on
+the host. See [GitHub Actions setup](./docs/GITHUB_ACTIONS_SETUP.md) and
+[LankaHost deployment](./docs/LANKAHOST_DEPLOYMENT.md) before enabling upload.

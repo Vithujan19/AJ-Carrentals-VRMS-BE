@@ -1,0 +1,202 @@
+name: Backend CI and FTPS deployment
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      confirm_production_deployment:
+        description: Confirm upload of the selected master branch ref
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aj-car-rentals-backend-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Test and package backend (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ['22', '24']
+    env:
+      NODE_ENV: test
+      DATABASE_URL: mysql://ci:ci@127.0.0.1:3306/ci
+      FRONTEND_ORIGINS: https://book.ajcarrentals.lk
+      CSRF_SECRET: ci-only-secret-not-for-production-12345
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Validate Prisma schema
+        run: npx prisma validate --schema prisma/schema.prisma
+      - name: Generate Prisma Client
+        run: npx prisma generate --schema prisma/schema.prisma
+      - name: Lint
+        run: npm run lint
+      - name: Test
+        run: npm test
+      - name: Assemble source-only deployment package
+        if: matrix.node-version == '22'
+        run: |
+          set -euo pipefail
+          package_dir="$RUNNER_TEMP/backend-package"
+          mkdir -p "$package_dir/prisma"
+          cp package.json package-lock.json "$package_dir/"
+          cp -R src scripts "$package_dir/"
+          cp prisma/schema.prisma prisma/seed.js "$package_dir/prisma/"
+          cp -R prisma/migrations "$package_dir/prisma/"
+          node --input-type=module <<'JS'
+          import { lstat, readdir } from 'node:fs/promises';
+          import path from 'node:path';
+
+          const root = path.join(process.env.RUNNER_TEMP, 'backend-package');
+          const allowed = new Set(['package.json', 'package-lock.json', 'src', 'scripts', 'prisma']);
+          for (const entry of await readdir(root)) {
+            if (!allowed.has(entry)) throw new Error(`Unexpected package entry: ${entry}`);
+          }
+          for (const file of [
+            'package.json', 'package-lock.json', 'src/server.js', 'src/app.js',
+            'src/db/prisma.js', 'prisma/schema.prisma', 'prisma/seed.js',
+            'prisma/migrations/migration_lock.toml', 'scripts/bootstrap-admin.js',
+          ]) {
+            if (!(await lstat(path.join(root, file))).isFile()) {
+              throw new Error(`Required package file is missing or not a file: ${file}`);
+            }
+          }
+          async function verify(directory) {
+            for (const entry of await readdir(directory)) {
+              const fullPath = path.join(directory, entry);
+              const info = await lstat(fullPath);
+              if (info.isSymbolicLink()) throw new Error(`Symlink is not allowed: ${fullPath}`);
+              if (info.isDirectory()) {
+                if (['node_modules', '.git', '.github', 'test', 'tests', 'coverage', 'var', 'uploads'].includes(entry)) {
+                  throw new Error(`Forbidden package directory: ${fullPath}`);
+                }
+                await verify(fullPath);
+              } else if (!info.isFile() || /(^\.env($|\.)|\.log$|\.sqlite$|\.db$|^\.DS_Store$)/i.test(entry)) {
+                throw new Error(`Forbidden package file: ${fullPath}`);
+              }
+            }
+          }
+          await verify(root);
+          JS
+      - name: Upload backend package
+        if: matrix.node-version == '22'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: backend-package-${{ github.sha }}
+          path: ${{ runner.temp }}/backend-package/
+          if-no-files-found: error
+          retention-days: 7
+      - name: Report validation
+        run: |
+          echo "Validated commit: $GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+          echo "The source-only package does not include node_modules or a generated Prisma Client." >> "$GITHUB_STEP_SUMMARY"
+          echo "Install dependencies and generate Prisma Client on the host; migrations and restart are manual." >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    name: Upload backend source via explicit FTPS
+    if: >-
+      github.ref == 'refs/heads/master' &&
+      vars.ENABLE_PRODUCTION_DEPLOYMENT == 'true' &&
+      (github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && inputs.confirm_production_deployment))
+    needs: validate
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 30
+    concurrency:
+      group: aj-car-rentals-backend-production
+      cancel-in-progress: false
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: backend-package-${{ github.sha }}
+          path: backend-package
+      - name: Install lftp
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y lftp
+      - name: Deploy over explicit FTPS
+        env:
+          FTP_SERVER: ${{ secrets.FTP_SERVER }}
+          FTP_USERNAME: ${{ secrets.FTP_USERNAME }}
+          FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
+          REMOTE_DIR: ${{ vars.FTP_REMOTE_DIR || './' }}
+          LOCAL_DIR: backend-package
+        run: |
+          set -euo pipefail
+          : "${FTP_SERVER:?Missing FTP_SERVER secret}"
+          : "${FTP_USERNAME:?Missing FTP_USERNAME secret}"
+          : "${FTP_PASSWORD:?Missing FTP_PASSWORD secret}"
+          if [ "$FTP_SERVER" != "ftp.ajcarrentals.lk" ]; then
+            echo "::error::Backend deployment must use the configured FTPS host."
+            exit 1
+          fi
+          if [ "$FTP_USERNAME" != "aj_carrentals@bookapi.ajcarrentals.lk" ]; then
+            echo "::error::Backend deployment must use the backend FTP account."
+            exit 1
+          fi
+          if [[ ! "$REMOTE_DIR" =~ ^\./[A-Za-z0-9._/-]*$ ]] || [[ "$REMOTE_DIR" == *..* ]]; then
+            echo "::error::FTP_REMOTE_DIR must be a safe path relative to the FTP account root."
+            exit 1
+          fi
+          test -s "$LOCAL_DIR/src/server.js"
+          mkdir -p "$RUNNER_TEMP/lftp-home"
+          export HOME="$RUNNER_TEMP/lftp-home"
+          export FTP_SERVER FTP_USERNAME FTP_PASSWORD
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          def netrc_quote(value):
+              return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+          path = Path.home() / '.netrc'
+          path.write_text(
+              f"machine {os.environ['FTP_SERVER']} "
+              f"login {netrc_quote(os.environ['FTP_USERNAME'])} "
+              f"password {netrc_quote(os.environ['FTP_PASSWORD'])}\n",
+              encoding='utf-8',
+          )
+          path.chmod(0o600)
+          PY
+          trap 'rm -f "$HOME/.netrc" "$RUNNER_TEMP/lftp.commands"' EXIT
+          cat > "$RUNNER_TEMP/lftp.commands" <<EOF
+          set cmd:fail-exit yes
+          set ftp:ssl-force true
+          set ftp:ssl-auth TLS
+          set ftp:ssl-protect-data true
+          set ssl:verify-certificate true
+          set net:timeout 20
+          set net:max-retries 2
+          set net:reconnect-interval-base 5
+          open ftp://$FTP_SERVER:21
+          mirror --reverse --verbose --no-perms --no-umask --exclude-glob .env* --exclude-glob var/** --exclude-glob uploads/** "$LOCAL_DIR" "$REMOTE_DIR"
+          bye
+          EOF
+          lftp -f "$RUNNER_TEMP/lftp.commands"
+      - name: Explain required hosting-panel activation
+        run: |
+          {
+            echo "## Backend source upload completed"
+            echo
+            echo "FTPS upload does not confirm the application is running. Install dependencies and generate Prisma Client on the hosting server."
+            echo "Apply reviewed migrations using the approved hosting procedure, restart the application, and verify /health and /ready."
+            echo "No database migration, application restart, or health check was executed by this workflow."
+          } >> "$GITHUB_STEP_SUMMARY"
