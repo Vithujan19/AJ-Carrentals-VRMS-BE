@@ -19,15 +19,17 @@ Add these repository variables:
 
 | Variable | Value |
 |---|---|
-| `BE_FTP_REMOTE_DIR` | `./` unless the FTP account's application directory is verified elsewhere |
+| `FTP_REMOTE_DIR` | `./` unless the FTP account's application directory is verified elsewhere |
 | `ENABLE_PRODUCTION_DEPLOYMENT` | Leave unset or `false` until production setup and first-deploy approval are complete |
 
 Protect `master` with reviewed pull requests and required CI. Create a
 `production` GitHub Environment, restrict deployments to `master`, and
 configure required reviewers. Confirm the repository's plan enforces these
 protections. The workflow uploads a source-only package over explicit FTPS
-with TLS certificate verification, using a non-destructive mirror. It does
-not upload `.env`, dependencies, uploads, or persistent `var/` data.
+with TLS certificate verification. The FTP action records deployed files in
+`.aj-car-rentals-backend-ftp-sync-state.json` and may delete previously tracked
+files removed from a later package. It does not upload `.env`, dependencies,
+uploads, or persistent `var/` data; these paths are excluded from syncing.
 
 ## Triggers and manual deployment
 

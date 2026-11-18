@@ -128,17 +128,13 @@ jobs:
         with:
           name: backend-package-${{ github.sha }}
           path: backend-package
-      - name: Install lftp
-        run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y lftp
-      - name: Deploy over explicit FTPS
+      - name: Validate deployment configuration
+        id: deployment-config
         env:
           FTP_SERVER: ${{ secrets.FTP_SERVER }}
           FTP_USERNAME: ${{ secrets.FTP_USERNAME }}
           FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
           REMOTE_DIR: ${{ vars.FTP_REMOTE_DIR || './' }}
-          LOCAL_DIR: backend-package
         run: |
           set -euo pipefail
           : "${FTP_SERVER:?Missing FTP_SERVER secret}"
@@ -156,41 +152,31 @@ jobs:
             echo "::error::FTP_REMOTE_DIR must be a safe path relative to the FTP account root."
             exit 1
           fi
-          test -s "$LOCAL_DIR/src/server.js"
-          mkdir -p "$RUNNER_TEMP/lftp-home"
-          export HOME="$RUNNER_TEMP/lftp-home"
-          export FTP_SERVER FTP_USERNAME FTP_PASSWORD
-          python3 - <<'PY'
-          import os
-          from pathlib import Path
-
-          def netrc_quote(value):
-              return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
-
-          path = Path.home() / '.netrc'
-          path.write_text(
-              f"machine {os.environ['FTP_SERVER']} "
-              f"login {netrc_quote(os.environ['FTP_USERNAME'])} "
-              f"password {netrc_quote(os.environ['FTP_PASSWORD'])}\n",
-              encoding='utf-8',
-          )
-          path.chmod(0o600)
-          PY
-          trap 'rm -f "$HOME/.netrc" "$RUNNER_TEMP/lftp.commands"' EXIT
-          cat > "$RUNNER_TEMP/lftp.commands" <<EOF
-          set cmd:fail-exit yes
-          set ftp:ssl-force true
-          set ftp:ssl-auth TLS
-          set ftp:ssl-protect-data true
-          set ssl:verify-certificate true
-          set net:timeout 20
-          set net:max-retries 2
-          set net:reconnect-interval-base 5
-          open ftp://$FTP_SERVER:21
-          mirror --reverse --verbose --no-perms --no-umask --exclude-glob .env* --exclude-glob var/** --exclude-glob uploads/** "$LOCAL_DIR" "$REMOTE_DIR"
-          bye
-          EOF
-          lftp -f "$RUNNER_TEMP/lftp.commands"
+          test -s backend-package/src/server.js
+          [[ "$REMOTE_DIR" == */ ]] || REMOTE_DIR="$REMOTE_DIR/"
+          echo "remote_dir=$REMOTE_DIR" >> "$GITHUB_OUTPUT"
+      - name: Upload source over explicit FTPS
+        uses: SamKirkland/FTP-Deploy-Action@8e83cea8672e3fbcbb9fdafff34debf6ae4c5f65 # v4.3.5
+        with:
+          server: ${{ secrets.FTP_SERVER }}
+          username: ${{ secrets.FTP_USERNAME }}
+          password: ${{ secrets.FTP_PASSWORD }}
+          port: 21
+          protocol: ftps
+          security: strict
+          local-dir: backend-package/
+          server-dir: ${{ steps.deployment-config.outputs.remote_dir }}
+          state-name: .aj-car-rentals-backend-ftp-sync-state.json
+          dangerous-clean-slate: false
+          exclude: |
+            **/.git*
+            **/.git*/**
+            **/.env
+            **/.env.*
+            **/node_modules/**
+            **/var/**
+            **/uploads/**
+          log-level: minimal
       - name: Explain required hosting-panel activation
         run: |
           {

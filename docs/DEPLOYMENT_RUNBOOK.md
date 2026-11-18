@@ -23,11 +23,12 @@
 
 ## Upload, migrate, restart, and verify
 
-- CI validates and uploads a source-only package over verified explicit FTPS,
-  preserving `.env`, `var/`, uploads, and unknown remote files. Remote
-  deletion is never used. Upload writes directly to the live application
-  directory and is not atomic; arrange a maintenance window and a tested
-  backup before uploading.
+- CI validates and uploads a source-only package over verified explicit FTPS.
+  The action excludes `.env`, `var/`, uploads and dependencies, but can
+  delete previously tracked files removed from a subsequent package. Review
+  package removals and verify the backend sync state and target before each
+  deployment. Upload writes directly to the live application directory and is
+  not atomic; arrange a maintenance window and a tested backup before upload.
 - Using a hosting-supported command facility in the application directory,
   install the locked dependencies with `npm ci --include=dev`, then run
   `npm run prisma:generate`. The Prisma CLI is a dev dependency and there is
