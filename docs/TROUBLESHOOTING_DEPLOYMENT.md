@@ -6,6 +6,7 @@
 | TLS or certificate failure | Confirm explicit FTPS on port 21 and certificate validity. Do not disable verification or fall back to plain FTP. |
 | Permission denied or files missing | Inspect the FTP account's accessible directory and verify `FTP_REMOTE_DIR`; its default is `./`. Do not broaden permissions. Check whether a previously tracked file was removed from the package. |
 | `npm start` fails | Check the configured cPanel Node.js application, Node 22, startup file `src/server.js`, existing host `.env`, and sanitized application logs. |
+| `ERR_REQUIRE_ASYNC_MODULE` from `lsnode.js` | Deploy the current `src/server.js` and restart the Node application. LiteSpeed loads the entry point with `require()`, so the entry point and its imports must not use top-level await. |
 | Prisma or Argon2 native error | Install dependencies and generate Prisma Client on the host; verify Node version, host OS, architecture, OpenSSL and sanitized errors. The workflow does not upload generated dependencies. |
 | Readiness check fails | Manually check `/ready`, which queries the database. Verify the host restart, production environment, and DB access using sanitized logs. `/health` does not test the database. |
 | Migration fails | Stop. Check migration status, reviewed SQL, database backup, and host connectivity. Use an operator-approved recovery plan; never reset or push the schema. |
