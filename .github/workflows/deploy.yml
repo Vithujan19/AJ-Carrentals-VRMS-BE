@@ -162,7 +162,7 @@ jobs:
           username: ${{ secrets.FTP_USERNAME }}
           password: ${{ secrets.FTP_PASSWORD }}
           port: 21
-          protocol: ftps
+          protocol: ftp
           security: strict
           local-dir: backend-package/
           server-dir: ${{ steps.deployment-config.outputs.remote_dir }}
