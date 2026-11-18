@@ -124,6 +124,15 @@ enum BookingStatus {
   COMPLETED
 }
 
+enum WhatsAppMessageStatus {
+  QUEUED
+  SENDING
+  SENT
+  DELIVERED
+  READ
+  FAILED
+}
+
 enum BookingSource {
   PUBLIC_WEBSITE
   STAFF_PORTAL
@@ -473,6 +482,7 @@ model Vehicle {
   description          String?       @db.Text
   publicDescription    String?       @db.Text
   isPublished          Boolean       @default(false)
+  publishedAt          DateTime?     @db.DateTime(3)
   internalNotes        String?       @db.Text
   status               VehicleStatus @default(ACTIVE)
   createdAt            DateTime      @default(now()) @db.DateTime(3)
@@ -808,6 +818,11 @@ model Booking {
   returnLocationSnapshot    String?       @db.VarChar(255)
   customerNotes              String?       @db.Text
   internalNotes              String?       @db.Text
+  whatsappConsent            Boolean       @default(false)
+  whatsappConsentAt          DateTime?     @db.DateTime(3)
+  whatsappConsentSource      String?       @db.VarChar(40)
+  whatsappConsentRevokedAt   DateTime?     @db.DateTime(3)
+  whatsappOpenedAt           DateTime?     @db.DateTime(3)
   rejectionReason            String?       @db.VarChar(1000)
   rejectedAt                 DateTime?     @db.DateTime(3)
   cancellationReason         String?       @db.VarChar(1000)
@@ -835,6 +850,7 @@ model Booking {
   customerVerificationReviews RentalCustomerVerification[]
   operationDrafts  RentalOperationDraft[]
   finalization     RentalFinalization?
+  whatsappMessages WhatsAppMessage[]
 
   @@unique([referenceYear, referenceSequence])
   @@index([vehicleId, status, pickupAt, returnAt])
@@ -1609,4 +1625,43 @@ model SystemSetting {
   updatedBy StaffUser? @relation("SystemSettingUpdater", fields: [updatedByStaffId], references: [id], onDelete: SetNull, onUpdate: Cascade)
 
   @@index([updatedByStaffId, updatedAt])
+}
+
+model WhatsAppMessage {
+  id                String                @id @default(uuid()) @db.Char(36)
+  bookingId         String                @db.Char(36)
+  category          String                @db.VarChar(40)
+  provider          String                @db.VarChar(40)
+  templateName      String                @db.VarChar(120)
+  recipient         String                @db.VarChar(32)
+  status            WhatsAppMessageStatus @default(QUEUED)
+  providerMessageId String?               @unique @db.VarChar(191)
+  errorCode         String?               @db.VarChar(80)
+  errorMessage      String?               @db.VarChar(500)
+  retryCount        Int                   @default(0) @db.UnsignedSmallInt
+  nextAttemptAt     DateTime?             @db.DateTime(3)
+  sentAt            DateTime?             @db.DateTime(3)
+  deliveredAt       DateTime?             @db.DateTime(3)
+  readAt            DateTime?             @db.DateTime(3)
+  createdAt         DateTime              @default(now()) @db.DateTime(3)
+  updatedAt         DateTime              @updatedAt @db.DateTime(3)
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([bookingId, category])
+  @@index([status, nextAttemptAt])
+}
+
+model IdempotencyKey {
+  id           String   @id @default(uuid()) @db.Char(36)
+  scope        String   @db.VarChar(40)
+  keyHash      String   @db.Char(64)
+  requestHash  String   @db.Char(64)
+  bookingId    String?  @db.Char(36)
+  responseBody Json?
+  createdAt    DateTime @default(now()) @db.DateTime(3)
+  expiresAt    DateTime @db.DateTime(3)
+
+  @@unique([scope, keyHash])
+  @@index([expiresAt])
 }

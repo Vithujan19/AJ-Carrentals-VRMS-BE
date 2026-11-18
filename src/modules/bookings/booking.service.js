@@ -3,6 +3,7 @@ import { AppError } from '../../shared/errors.js';
 import {
   assertVehicleAvailable,
   blockingAvailabilityBlockWhere,
+  blockingBookingWhere,
   blockingMaintenanceWhere,
   dateAvailabilityWhere,
 } from '../../shared/vehicle-availability.js';
@@ -19,6 +20,8 @@ import { findActiveRentalPolicy as activeRentalPolicy } from '../../shared/renta
 import { calculateRentalFinancialSummary } from '../../shared/rental-finance.js';
 import { allocateBookingReference } from './booking-reference.js';
 import { decimal, priceQuote } from './booking-pricing.js';
+import { enqueueBookingConfirmation } from '../whatsapp/whatsapp.service.js';
+import { vehicleLabel } from '../whatsapp/whatsapp.link.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const allowedTransitions = Object.freeze({
@@ -227,6 +230,13 @@ function bookingInclude() {
       include: { allocations: true },
     },
     depositApplications: { orderBy: { appliedAt: 'desc' } },
+    whatsappMessages: {
+      orderBy: { createdAt: 'asc' },
+      select: {
+        id: true, category: true, provider: true, status: true, errorCode: true, errorMessage: true,
+        retryCount: true, sentAt: true, deliveredAt: true, readAt: true, createdAt: true,
+      },
+    },
     handover: {
       include: {
         return: true,
@@ -491,7 +501,13 @@ function assertTransition(fromStatus, toStatus) {
   }
 }
 
-export function createBookingService({ prisma, logger, notificationDelivery }) {
+export function createBookingService({
+  prisma,
+  logger,
+  notificationDelivery,
+  whatsappService = null,
+  whatsappConfig = null,
+}) {
   const actionResult = async (booking, actor, permissions) => {
     if (
       hasPermission(permissions, 'bookings.view') ||
@@ -655,6 +671,13 @@ export function createBookingService({ prisma, logger, notificationDelivery }) {
           returnLocationSnapshot: input.returnLocation ?? null,
           customerNotes: input.customerNotes ?? null,
           internalNotes: publicRequest ? null : input.internalNotes ?? null,
+          ...(publicRequest && input.whatsappConsent
+            ? {
+                whatsappConsent: true,
+                whatsappConsentAt: now,
+                whatsappConsentSource: 'PUBLIC_BOOKING_FORM',
+              }
+            : {}),
           createdAt: now,
         },
       });
@@ -701,6 +724,16 @@ export function createBookingService({ prisma, logger, notificationDelivery }) {
           source: booking.source,
         },
       });
+      if (publicRequest && input.whatsappConsent) {
+        await writeAudit(tx, {
+          ...actorAuditFields(actor),
+          action: 'booking.whatsapp_consent_recorded',
+          entityType: 'Booking',
+          entityId: booking.id,
+          ...auditContext,
+          afterSnapshot: { source: 'PUBLIC_BOOKING_FORM' },
+        });
+      }
       if (initialStatus === 'CONFIRMED') {
         await writeAudit(tx, {
           ...actorAuditFields(actor),
@@ -711,12 +744,18 @@ export function createBookingService({ prisma, logger, notificationDelivery }) {
           afterSnapshot: { status: 'CONFIRMED', confirmedTotal: quote.total },
         });
       }
+      const vehicleRecord = await tx.vehicle.findUnique({
+        where: { id: input.vehicleId },
+        select: { specification: { select: { make: true, model: true, variant: true } } },
+      });
       return {
         id: booking.id,
         reference: booking.reference,
         status: booking.status,
         pickupAt: booking.pickupAt,
         returnAt: booking.returnAt,
+        customerNameSnapshot: booking.customerNameSnapshot,
+        vehicleName: vehicleLabel(vehicleRecord?.specification),
         customerEmailSnapshot: booking.customerEmailSnapshot,
         estimatedTotal: booking.estimatedTotal.toString(),
         currency: booking.currency,
@@ -867,6 +906,86 @@ export function createBookingService({ prisma, logger, notificationDelivery }) {
         auditContext,
         publicRequest: true,
       });
+    },
+
+    async recordWhatsAppOpened({ reference, token, auditContext }) {
+      const record = await prisma.booking.findUnique({
+        where: { reference },
+        select: { id: true, publicLookupTokenHash: true, whatsappOpenedAt: true },
+      });
+      if (!record || !compareHashes(record.publicLookupTokenHash, hashLookupToken(token))) {
+        throw new AppError(404, 'BOOKING_LOOKUP_NOT_FOUND', 'No booking was found for those details.');
+      }
+      if (!record.whatsappOpenedAt) {
+        await prisma.booking.update({ where: { id: record.id }, data: { whatsappOpenedAt: new Date() } });
+        await writeAudit(prisma, {
+          actorIdentifierSnapshot: 'public-customer',
+          action: 'booking.whatsapp_chat_opened',
+          entityType: 'Booking',
+          entityId: record.id,
+          ...auditContext,
+        });
+      }
+      return { recorded: true };
+    },
+
+    async revokeWhatsAppConsent({ reference, token, auditContext }) {
+      const record = await prisma.booking.findUnique({
+        where: { reference },
+        select: { id: true, publicLookupTokenHash: true, whatsappConsent: true, whatsappConsentRevokedAt: true },
+      });
+      if (!record || !compareHashes(record.publicLookupTokenHash, hashLookupToken(token))) {
+        throw new AppError(404, 'BOOKING_LOOKUP_NOT_FOUND', 'No booking was found for those details.');
+      }
+      if (record.whatsappConsent && !record.whatsappConsentRevokedAt) {
+        await prisma.booking.update({ where: { id: record.id }, data: { whatsappConsentRevokedAt: new Date() } });
+        await writeAudit(prisma, {
+          actorIdentifierSnapshot: 'public-customer',
+          action: 'booking.whatsapp_consent_revoked',
+          entityType: 'Booking',
+          entityId: record.id,
+          ...auditContext,
+        });
+      }
+      return { revoked: true };
+    },
+
+    async publicVehicleCalendar({ vehicleId, from, to }) {
+      const vehicle = await prisma.vehicle.findFirst({
+        where: { id: vehicleId, isPublished: true, status: 'ACTIVE', archivedAt: null },
+        select: { id: true },
+      });
+      if (!vehicle) {
+        throw new AppError(404, 'VEHICLE_NOT_FOUND', 'Vehicle was not found.');
+      }
+      const [bookings, blocks, jobs] = await Promise.all([
+        prisma.booking.findMany({
+          where: { vehicleId, ...blockingBookingWhere(from, to) },
+          select: { pickupAt: true, returnAt: true },
+        }),
+        prisma.vehicleAvailabilityBlock.findMany({
+          where: { vehicleId, ...blockingAvailabilityBlockWhere(from, to) },
+          select: { startsAt: true, endsAt: true },
+        }),
+        prisma.maintenanceJob.findMany({
+          where: { vehicleId, ...blockingMaintenanceWhere(from, to) },
+          select: { scheduledStartAt: true, estimatedCompletionAt: true },
+        }),
+      ]);
+      const open = to;
+      const ranges = [
+        ...bookings.map((item) => ({ start: item.pickupAt, end: item.returnAt })),
+        ...blocks.map((item) => ({ start: item.startsAt, end: item.endsAt ?? open })),
+        ...jobs.map((item) => ({ start: item.scheduledStartAt ?? from, end: item.estimatedCompletionAt ?? open })),
+      ]
+        .map(({ start, end }) => ({
+          start: new Date(Math.max(start.getTime(), from.getTime())),
+          end: new Date(Math.min(end.getTime(), to.getTime())),
+        }))
+        .filter(({ start, end }) => end > start)
+        .sort((left, right) => left.start - right.start)
+        .map(({ start, end }) => ({ start: start.toISOString(), end: end.toISOString() }));
+      return { vehicleId, from: from.toISOString(), to: to.toISOString(), unavailable: ranges };
     },
 
     async publicLookup({ reference, token }) {
@@ -1259,6 +1378,7 @@ export function createBookingService({ prisma, logger, notificationDelivery }) {
 
     async confirm({ id, actor, permissions, auditContext }) {
       let updated;
+      let queuedMessage = null;
       try {
         const vehicleId = await bookingVehicleId(prisma, id);
         updated = await runTransaction(prisma, async (tx) => {
@@ -1292,6 +1412,9 @@ export function createBookingService({ prisma, logger, notificationDelivery }) {
               occurredAt: now,
             },
           });
+          if (whatsappConfig) {
+            queuedMessage = await enqueueBookingConfirmation(tx, { booking: confirmed, config: whatsappConfig });
+          }
           await writeAudit(tx, {
             ...actorAuditFields(actor),
             action: 'booking.confirmed',
@@ -1321,6 +1444,11 @@ export function createBookingService({ prisma, logger, notificationDelivery }) {
         throw error;
       }
       await safeNotify('sendStatusChanged', updated);
+      if (queuedMessage && whatsappService) {
+        await whatsappService.send(queuedMessage.id).catch((error) => {
+          logger?.warn({ event: 'whatsapp_send_failed', reference: updated.reference, errorCode: error?.code });
+        });
+      }
       return actionResult(updated, actor, permissions);
     },
 

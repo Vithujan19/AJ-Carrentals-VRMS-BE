@@ -62,7 +62,8 @@ export function createCsrfProtection(config) {
   const safeMethods = new Set(['GET', 'HEAD', 'OPTIONS']);
   const allowedOrigins = new Set(config.frontendOrigins);
   return function csrfProtection(req, _res, next) {
-    if (safeMethods.has(req.method)) {
+    // Meta webhooks are server-to-server and authenticated by an HMAC signature instead.
+    if (safeMethods.has(req.method) || req.path === '/api/v1/webhooks/whatsapp') {
       next();
       return;
     }

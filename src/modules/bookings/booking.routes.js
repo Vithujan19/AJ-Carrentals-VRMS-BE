@@ -3,6 +3,12 @@ import rateLimit from 'express-rate-limit';
 import { requireAnyPermission, requirePermission } from '../../middleware/authorize.js';
 import { validate } from '../../middleware/validate.js';
 import { requestAuditContext } from '../../shared/audit.js';
+import { AppError } from '../../shared/errors.js';
+import { withIdempotency } from '../../shared/idempotency.js';
+import {
+  bookingRequestMessage,
+  clickToChatUrl,
+} from '../whatsapp/whatsapp.link.js';
 import {
   availabilitySchema,
   bookingCalendarSchema,
@@ -10,8 +16,11 @@ import {
   bookingListSchema,
   bookingReasonSchema,
   customerSearchSchema,
+  idempotencyKeySchema,
+  publicBookingTokenSchema,
   publicCreateBookingSchema,
   publicLookupSchema,
+  publicVehicleCalendarSchema,
   staffCreateBookingSchema,
   updateBookingSchema,
 } from './booking.schemas.js';
@@ -33,7 +42,7 @@ function publicRateLimit(message) {
   });
 }
 
-export function createPublicBookingRouter({ bookingService }) {
+export function createPublicBookingRouter({ bookingService, whatsappService, prisma }) {
   const router = Router();
   const requestLimiter = publicRateLimit('Too many booking requests. Try again later.');
   const lookupLimiter = publicRateLimit('Too many booking lookups. Try again later.');
@@ -56,25 +65,95 @@ export function createPublicBookingRouter({ bookingService }) {
     });
   });
 
+  router.get('/config', (_req, res) => {
+    res.set('Cache-Control', 'public, max-age=300');
+    res.json({ data: whatsappService.publicConfig() });
+  });
+
+  router.get('/vehicles/:id/calendar', validate(publicVehicleCalendarSchema), async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    const { params, query } = req.validated;
+    res.json({
+      data: await bookingService.publicVehicleCalendar({
+        vehicleId: params.id,
+        from: new Date(query.from),
+        to: new Date(query.to),
+      }),
+    });
+  });
+
   router.post(
     '/booking-requests',
     requestLimiter,
     validate(publicCreateBookingSchema),
     async (req, res) => {
-      const booking = await bookingService.createPublicRequest({
-        input: req.validated.body,
-        auditContext: requestAuditContext(req),
-      });
-      res.status(201).json({
-        data: {
-          reference: booking.reference,
-          status: booking.status,
-          pickupAt: booking.pickupAt,
-          returnAt: booking.returnAt,
-          estimatedTotal: booking.estimatedTotal,
-          currency: booking.currency,
-          lookupToken: booking.lookupToken,
+      const rawKey = req.get('idempotency-key');
+      const parsedKey = rawKey === undefined ? { success: true, data: undefined } : idempotencyKeySchema.safeParse(rawKey);
+      if (!parsedKey.success) {
+        throw new AppError(400, 'INVALID_IDEMPOTENCY_KEY', 'Idempotency-Key must be 8-128 letters, numbers, hyphens or underscores.');
+      }
+      const { result, replayed } = await withIdempotency(prisma, {
+        scope: 'public-booking-request',
+        key: parsedKey.data,
+        body: req.validated.body,
+        run: async () => {
+          const booking = await bookingService.createPublicRequest({
+            input: req.validated.body,
+            auditContext: requestAuditContext(req),
+          });
+          const { whatsappNumber, businessName } = whatsappService.publicConfig();
+          return {
+            bookingId: booking.id,
+            reference: booking.reference,
+            status: booking.status,
+            pickupAt: booking.pickupAt,
+            returnAt: booking.returnAt,
+            estimatedTotal: booking.estimatedTotal,
+            currency: booking.currency,
+            lookupToken: booking.lookupToken,
+            whatsappUrl: clickToChatUrl(whatsappNumber, bookingRequestMessage({
+              businessName,
+              reference: booking.reference,
+              vehicleName: booking.vehicleName,
+              pickupAt: booking.pickupAt,
+              returnAt: booking.returnAt,
+              customerName: booking.customerNameSnapshot,
+            })),
+          };
         },
+      });
+      const data = { ...result, replayed };
+      delete data.bookingId;
+      res.status(replayed ? 200 : 201).json({ data });
+    },
+  );
+
+  router.post(
+    '/booking-requests/:reference/whatsapp-opened',
+    lookupLimiter,
+    validate(publicBookingTokenSchema),
+    async (req, res) => {
+      res.json({
+        data: await bookingService.recordWhatsAppOpened({
+          reference: req.validated.params.reference,
+          token: req.validated.body.token,
+          auditContext: requestAuditContext(req),
+        }),
+      });
+    },
+  );
+
+  router.post(
+    '/booking-requests/:reference/whatsapp-consent/revoke',
+    lookupLimiter,
+    validate(publicBookingTokenSchema),
+    async (req, res) => {
+      res.json({
+        data: await bookingService.revokeWhatsAppConsent({
+          reference: req.validated.params.reference,
+          token: req.validated.body.token,
+          auditContext: requestAuditContext(req),
+        }),
       });
     },
   );

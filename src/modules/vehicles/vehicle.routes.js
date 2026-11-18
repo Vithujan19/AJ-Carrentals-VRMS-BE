@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { requireAnyPermission, requirePermission } from '../../middleware/authorize.js';
 import { validate } from '../../middleware/validate.js';
 import { requestAuditContext } from '../../shared/audit.js';
+import { AppError } from '../../shared/errors.js';
 import {
   archiveVehicleSchema,
   createMileageReadingSchema,
@@ -15,12 +16,22 @@ import {
   reorderVehicleImagesSchema,
   updateVehicleDocumentSchema,
   updateVehicleImageSchema,
+  updateVehiclePublicationSchema,
   updateVehicleSchema,
   updateVehicleStatusSchema,
   vehicleDocumentParamsSchema,
   vehicleIdSchema,
   vehicleListSchema,
 } from './vehicle.schemas.js';
+
+function requirePublishPermission(req, res, next) {
+  const isPublishing = req.validated.body.isPublished !== undefined;
+  if (isPublishing && !req.auth.staff.permissions.includes('vehicles.publish')) {
+    next(new AppError(403, 'PERMISSION_DENIED', 'You do not have permission to publish or unpublish vehicles.'));
+    return;
+  }
+  next();
+}
 
 function sendFile(res, {
   buffer,
@@ -82,6 +93,7 @@ export function createVehicleRouter({
     '/',
     requirePermission('vehicles.create'),
     validate(createVehicleSchema),
+    requirePublishPermission,
     async (req, res) => {
       const vehicle = await vehicleService.create({
         input: req.validated.body,
@@ -126,6 +138,7 @@ export function createVehicleRouter({
     '/:id',
     requirePermission('vehicles.update'),
     validate(updateVehicleSchema),
+    requirePublishPermission,
     async (req, res) => {
       const vehicle = await vehicleService.update({
         id: req.validated.params.id,
@@ -134,6 +147,30 @@ export function createVehicleRouter({
         auditContext: requestAuditContext(req),
       });
       res.json({ data: vehicle });
+    },
+  );
+
+  router.patch(
+    '/:id/publication',
+    requirePermission('vehicles.publish'),
+    validate(updateVehiclePublicationSchema),
+    async (req, res) => {
+      const vehicle = await vehicleService.setPublication({
+        id: req.validated.params.id,
+        isPublished: req.validated.body.isPublished,
+        actor: req.auth.staff,
+        auditContext: requestAuditContext(req),
+      });
+      res.json({ data: vehicle });
+    },
+  );
+
+  router.get(
+    '/:id/public-preview',
+    requireAnyPermission('vehicles.view', 'vehicles.publish'),
+    validate(vehicleIdSchema),
+    async (req, res) => {
+      res.json({ data: await vehicleService.publicPreview({ id: req.validated.params.id }) });
     },
   );
 

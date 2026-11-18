@@ -70,6 +70,8 @@ export const publicVehicleListSchema = z.object({
     fuelType: fuelType.optional(),
     transmission: transmission.optional(),
     seatingCapacity: z.coerce.number().int().min(1).max(255).optional(),
+    maxPrice: z.coerce.number().min(0).max(1_000_000_000).optional(),
+    sort: z.enum(['newest', 'name', 'year_desc']).default('newest'),
   }),
 });
 
@@ -153,6 +155,11 @@ export const updateVehicleSchema = z.object({
       .refine((fields) => Object.keys(fields).length > 0, 'Provide at least one specification field.')
       .optional(),
   }).refine((body) => Object.keys(body).length > 0, 'Provide at least one field to update.'),
+});
+
+export const updateVehiclePublicationSchema = z.object({
+  params: z.object({ id: uuid }),
+  body: z.object({ isPublished: z.boolean() }).strict(),
 });
 
 export const vehicleIdSchema = z.object({ params: z.object({ id: uuid }) });

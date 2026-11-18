@@ -21,6 +21,8 @@ import { createStaffService } from './modules/staff/staff.service.js';
 import { createBookingRouter, createPublicBookingRouter } from './modules/bookings/booking.routes.js';
 import { createBookingService } from './modules/bookings/booking.service.js';
 import { createBookingNotificationDelivery } from './modules/bookings/booking-notification-delivery.js';
+import { createWhatsAppRouter, createWhatsAppWebhookRouter } from './modules/whatsapp/whatsapp.routes.js';
+import { createWhatsAppService } from './modules/whatsapp/whatsapp.service.js';
 import { createPricingRouter } from './modules/pricing/pricing.routes.js';
 import { createPricingService } from './modules/pricing/pricing.service.js';
 import { createPublicVehicleRouter, createVehicleRouter } from './modules/vehicles/vehicle.routes.js';
@@ -61,10 +63,17 @@ export function createApp({
   });
   const pricingService = createPricingService({ prisma: database });
   const bookingNotificationDelivery = createBookingNotificationDelivery(applicationConfig);
+  const whatsappService = createWhatsAppService({
+    prisma: database,
+    config: applicationConfig,
+    logger: applicationLogger,
+  });
   const bookingService = createBookingService({
     prisma: database,
     logger: applicationLogger,
     notificationDelivery: bookingNotificationDelivery,
+    whatsappService,
+    whatsappConfig: applicationConfig,
   });
 
   app.set('trust proxy', applicationConfig.TRUST_PROXY_HOPS);
@@ -94,12 +103,17 @@ export function createApp({
       },
       credentials: true,
       methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-      allowedHeaders: ['Content-Type', 'X-CSRF-Token'],
+      allowedHeaders: ['Content-Type', 'X-CSRF-Token', 'Idempotency-Key'],
       exposedHeaders: ['X-Request-Id'],
       maxAge: 600,
     }),
   );
-  app.use(express.json({ limit: '64kb' }));
+  app.use(express.json({
+    limit: '64kb',
+    verify(req, _res, buffer) {
+      req.rawBody = buffer;
+    },
+  }));
   app.use(cookieParser());
   app.use(createCsrfProtection(applicationConfig));
 
@@ -128,12 +142,14 @@ export function createApp({
   );
   app.use(
     '/api/v1/public',
-    createPublicBookingRouter({ bookingService }),
+    createPublicBookingRouter({ bookingService, whatsappService, prisma: database }),
   );
   app.use(
     '/api/v1/public',
     createPublicVehicleRouter({ vehicleService }),
   );
+  app.use('/api/v1/webhooks/whatsapp', createWhatsAppWebhookRouter({ whatsappService }));
+  app.use('/api/v1/whatsapp', createWhatsAppRouter({ whatsappService, authenticate }));
   app.use(
     '/api/v1/bookings',
     createBookingRouter({ bookingService, authenticate }),

@@ -29,6 +29,7 @@ function vehicleAuditSnapshot(vehicle) {
     registrationNumber: vehicle.registrationNumber,
     status: vehicle.status,
     isPublished: vehicle.isPublished,
+    publishedAt: vehicle.publishedAt,
     archivedAt: vehicle.archivedAt,
     currentOdometerKm: vehicle.currentOdometerKm,
     specification: vehicle.specification
@@ -235,6 +236,7 @@ function vehicleSummary(vehicle, now, includePricing) {
     description: vehicle.description,
     publicDescription: vehicle.publicDescription,
     isPublished: vehicle.isPublished,
+    publishedAt: vehicle.publishedAt,
     status: vehicle.status,
     archivedAt: vehicle.archivedAt,
     operationalStatus: operationalStatus(vehicle, now),
@@ -561,6 +563,23 @@ function translateVehicleUniqueError(error) {
   throw error;
 }
 
+function publicationData(isPublished, vehicle) {
+  if (isPublished && vehicle.status !== 'ACTIVE') {
+    throw new AppError(
+      409,
+      'VEHICLE_NOT_ACTIVE',
+      'Only active vehicles can be published on the public website.',
+    );
+  }
+  return { isPublished, publishedAt: isPublished ? new Date() : null };
+}
+
+const PUBLIC_SORTS = {
+  newest: [{ updatedAt: 'desc' }, { id: 'asc' }],
+  name: [{ specification: { make: 'asc' } }, { specification: { model: 'asc' } }, { id: 'asc' }],
+  year_desc: [{ specification: { manufacturingYear: 'desc' } }, { id: 'asc' }],
+};
+
 function publicVehicleSelect(now) {
   return {
     id: true,
@@ -621,11 +640,22 @@ function publicVehicle(vehicle) {
 export function createVehicleService({ prisma, config, storage }) {
   return {
     async publicList({ query }) {
-      const { page, limit, search, category, fuelType, transmission, seatingCapacity } = query;
+      const { page, limit, search, category, fuelType, transmission, seatingCapacity, maxPrice, sort = 'newest' } = query;
       const where = {
         isPublished: true,
         status: 'ACTIVE',
         archivedAt: null,
+        ...(maxPrice !== undefined ? {
+          rates: {
+            some: {
+              isActive: true,
+              rentalPrice: { lte: maxPrice },
+              effectiveFrom: { lte: new Date() },
+              OR: [{ effectiveTo: null }, { effectiveTo: { gt: new Date() } }],
+              rentalPackage: { isActive: true },
+            },
+          },
+        } : {}),
         ...((category || fuelType || transmission || seatingCapacity || search) ? {
           specification: {
             is: {
@@ -644,7 +674,7 @@ export function createVehicleService({ prisma, config, storage }) {
         prisma.vehicle.findMany({
           where,
           select: publicVehicleSelect(new Date()),
-          orderBy: [{ updatedAt: 'desc' }, { id: 'asc' }],
+          orderBy: PUBLIC_SORTS[sort] ?? PUBLIC_SORTS.newest,
           skip: (page - 1) * limit,
           take: limit,
         }),
@@ -771,6 +801,7 @@ export function createVehicleService({ prisma, config, storage }) {
           const vehicle = await tx.vehicle.create({
             data: {
               ...fields,
+              publishedAt: fields.isPublished ? new Date() : null,
               registrationNumber: fields.registrationNumber.trim().toUpperCase(),
               vin: fields.vin?.trim().toUpperCase() ?? null,
               chassisNumber: fields.chassisNumber?.trim().toUpperCase() ?? null,
@@ -849,7 +880,9 @@ export function createVehicleService({ prisma, config, storage }) {
             ...(fields.publicDescription === undefined
               ? {}
               : { publicDescription: fields.publicDescription }),
-            ...(fields.isPublished === undefined ? {} : { isPublished: fields.isPublished }),
+            ...(fields.isPublished === undefined || fields.isPublished === currentWithSpec.isPublished
+              ? {}
+              : publicationData(fields.isPublished, currentWithSpec)),
             ...(fields.internalNotes === undefined ? {} : { internalNotes: fields.internalNotes }),
           };
           if (specification) {
@@ -886,6 +919,42 @@ export function createVehicleService({ prisma, config, storage }) {
       } catch (error) {
         translateVehicleUniqueError(error);
       }
+    },
+
+    async setPublication({ id, isPublished, actor, auditContext }) {
+      return prisma.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM Vehicle WHERE id = ${id} FOR UPDATE`;
+        const current = await getActiveVehicle(tx, id);
+        if (current.isPublished === isPublished) {
+          return tx.vehicle.findUnique({ where: { id }, include: { specification: true } });
+        }
+        const updated = await tx.vehicle.update({
+          where: { id },
+          data: publicationData(isPublished, current),
+          include: { specification: true },
+        });
+        await writeAudit(tx, {
+          ...actorAuditFields(actor),
+          action: isPublished ? 'vehicle.published' : 'vehicle.unpublished',
+          entityType: 'Vehicle',
+          entityId: id,
+          ...auditContext,
+          beforeSnapshot: { isPublished: current.isPublished, publishedAt: current.publishedAt },
+          afterSnapshot: { isPublished: updated.isPublished, publishedAt: updated.publishedAt },
+        });
+        return updated;
+      });
+    },
+
+    async publicPreview({ id }) {
+      const vehicle = await prisma.vehicle.findFirst({
+        where: { id, archivedAt: null },
+        select: publicVehicleSelect(new Date()),
+      });
+      if (!vehicle) {
+        throw new AppError(404, 'VEHICLE_NOT_FOUND', 'Vehicle was not found.');
+      }
+      return publicVehicle(vehicle);
     },
 
     async updateStatus({ id, status, reason, actor, auditContext }) {

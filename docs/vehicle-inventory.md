@@ -84,3 +84,12 @@ For LankaHost, provision persistent private storage or an external private objec
 ## Not included
 
 This module does not create booking confirmation/hold workflows, customer management, maintenance job creation, vehicle handover/return, payment processing, or a production object-store adapter. Those depend on the corresponding separately scoped business modules.
+
+## Public sharing (publication)
+
+- `Vehicle.isPublished` is the Public Sharing flag; `Vehicle.publishedAt` records when it was last switched on.
+- `PATCH /api/v1/vehicles/:id/publication` (`{ "isPublished": boolean }`) requires `vehicles.publish` (ADMIN and MANAGER). Changing `isPublished` through create or update also requires this permission.
+- Only ACTIVE, unarchived vehicles can be published. Unpublishing never deletes the vehicle or its bookings.
+- Both changes write `vehicle.published` / `vehicle.unpublished` audit entries.
+- `GET /api/v1/vehicles/:id/public-preview` returns the public representation for staff, including unpublished vehicles.
+- Deployment: run the migration and `npm run db:seed` so the new `vehicles.publish` permission is synchronised to roles; otherwise nobody can publish.

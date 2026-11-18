@@ -13,8 +13,8 @@ const schema = z.object({
   FRONTEND_ORIGINS: z.string().min(1),
   CSRF_SECRET: z.string().min(32),
   SESSION_COOKIE_NAME: z.string().default('ajvrms_session'),
-  SESSION_TTL_SECONDS: z.coerce.number().int().positive().default(28_800),
-  SESSION_IDLE_TTL_SECONDS: z.coerce.number().int().positive().default(1_800),
+  SESSION_TTL_SECONDS: z.coerce.number().int().positive().default(14_400),
+  SESSION_IDLE_TTL_SECONDS: z.coerce.number().int().positive().default(14_400),
   COOKIE_SAME_SITE: z.enum(['strict', 'lax', 'none']).default('lax'),
   COOKIE_SECURE: booleanFromString.default('false'),
   PASSWORD_RESET_TTL_SECONDS: z.coerce.number().int().positive().default(1_800),
@@ -28,6 +28,17 @@ const schema = z.object({
   VEHICLE_IMAGE_MAX_BYTES: z.coerce.number().int().positive().max(52_428_800).default(10_485_760),
   VEHICLE_DOCUMENT_MAX_BYTES: z.coerce.number().int().positive().max(104_857_600).default(20_971_520),
   DOCUMENT_EXPIRY_WARNING_DAYS: z.coerce.number().int().min(1).max(365).default(30),
+  BUSINESS_NAME: z.string().trim().min(1).default('AJ Car Rentals'),
+  WHATSAPP_BUSINESS_NUMBER: z.string().trim().default(''),
+  WHATSAPP_PROVIDER: z.enum(['click_to_chat', 'cloud_api']).default('click_to_chat'),
+  WHATSAPP_PHONE_NUMBER_ID: z.string().trim().default(''),
+  WHATSAPP_ACCESS_TOKEN: z.string().trim().default(''),
+  WHATSAPP_APP_SECRET: z.string().trim().default(''),
+  WHATSAPP_VERIFY_TOKEN: z.string().trim().default(''),
+  WHATSAPP_API_VERSION: z.string().trim().default('v21.0'),
+  WHATSAPP_TEMPLATE_LANGUAGE: z.string().trim().default('en'),
+  WHATSAPP_CONFIRMATION_TEMPLATE: z.string().trim().default('booking_confirmed'),
+  WHATSAPP_DEFAULT_COUNTRY_CODE: z.string().trim().regex(/^\d{1,4}$/).default('94'),
 });
 
 const parsed = schema.safeParse(process.env);
@@ -54,8 +65,18 @@ if (parsed.data.COOKIE_SAME_SITE === 'none' && !parsed.data.COOKIE_SECURE) {
   throw new Error('COOKIE_SECURE must be true when COOKIE_SAME_SITE=none');
 }
 
+const whatsappCloudConfigured = Boolean(
+  parsed.data.WHATSAPP_PROVIDER === 'cloud_api' &&
+    parsed.data.WHATSAPP_PHONE_NUMBER_ID &&
+    parsed.data.WHATSAPP_ACCESS_TOKEN,
+);
+
 export const config = Object.freeze({
   ...parsed.data,
+  whatsappCloudConfigured,
+  whatsappWebhookConfigured: Boolean(
+    parsed.data.WHATSAPP_APP_SECRET && parsed.data.WHATSAPP_VERIFY_TOKEN,
+  ),
   frontendOrigins: parsed.data.FRONTEND_ORIGINS.split(',')
     .map((origin) => origin.trim())
     .filter(Boolean),

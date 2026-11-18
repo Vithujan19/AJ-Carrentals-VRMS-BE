@@ -47,3 +47,7 @@ The permission catalog also adds `staff.manage` as an administrator marker. The 
 ## Explicitly not done
 
 The administrator-token migration has not been applied by this change; no database was connected and the seed was not executed. Review migration status and backups before applying it to an approved target.
+
+## Session lifetime
+
+Staff sessions last at most four hours (`SESSION_TTL_SECONDS=14400`) and expire after four hours of inactivity (`SESSION_IDLE_TTL_SECONDS=14400`). Existing sessions keep their stored expiry. Explicit hosting environment values override these defaults.

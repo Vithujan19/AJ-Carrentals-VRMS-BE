@@ -213,3 +213,38 @@ describe('vehicle availability period filtering', () => {
     });
   });
 });
+
+describe('vehicle publication', () => {
+  const actor = { id: 'staff-id', email: 'staff@example.lk' };
+  const serviceFor = (vehicle) => {
+    const { prisma, tx } = createTransactionMocks(vehicle);
+    return {
+      tx,
+      service: createVehicleService({ prisma, config: {}, storage: {} }),
+    };
+  };
+
+  it('publishes an active vehicle, stamps publishedAt and audits the change', async () => {
+    const { service, tx } = serviceFor({ id: 'v1', status: 'ACTIVE', archivedAt: null, isPublished: false });
+    const result = await service.setPublication({ id: 'v1', isPublished: true, actor, auditContext: {} });
+    expect(result.isPublished).toBe(true);
+    expect(result.publishedAt).toBeInstanceOf(Date);
+    expect(tx.auditLog.create.mock.calls[0][0].data.action).toBe('vehicle.published');
+  });
+
+  it('unpublishes without deleting the vehicle and clears publishedAt', async () => {
+    const { service, tx } = serviceFor({
+      id: 'v1', status: 'ACTIVE', archivedAt: null, isPublished: true, publishedAt: new Date(),
+    });
+    const result = await service.setPublication({ id: 'v1', isPublished: false, actor, auditContext: {} });
+    expect(result).toMatchObject({ isPublished: false, publishedAt: null });
+    expect(tx.auditLog.create.mock.calls[0][0].data.action).toBe('vehicle.unpublished');
+  });
+
+  it('refuses to publish an inactive vehicle', async () => {
+    const { service, tx } = serviceFor({ id: 'v1', status: 'INACTIVE', archivedAt: null, isPublished: false });
+    await expect(service.setPublication({ id: 'v1', isPublished: true, actor, auditContext: {} }))
+      .rejects.toMatchObject({ status: 409, code: 'VEHICLE_NOT_ACTIVE' });
+    expect(tx.vehicle.update).not.toHaveBeenCalled();
+  });
+});

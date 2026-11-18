@@ -148,8 +148,29 @@ export const publicCreateBookingSchema = z.object({
     ...scheduleFields,
     ...customerFields,
     customerNotes: z.string().trim().max(4000).nullable().optional(),
+    whatsappConsent: z.boolean().default(false),
     website: z.string().max(0).optional(),
   }).superRefine(validateSchedule),
+});
+
+export const idempotencyKeySchema = z.string().trim().min(8).max(128).regex(/^[A-Za-z0-9_-]+$/);
+
+export const publicBookingTokenSchema = z.object({
+  params: z.object({ reference: z.string().trim().min(1).max(40) }),
+  body: z.object({ token: z.string().trim().min(16).max(200) }),
+});
+
+export const publicVehicleCalendarSchema = z.object({
+  params: z.object({ id: uuid }),
+  query: z.object({ from: dateTime, to: dateTime }).superRefine((query, context) => {
+    const from = new Date(query.from).getTime();
+    const to = new Date(query.to).getTime();
+    if (to <= from) {
+      context.addIssue({ code: 'custom', path: ['to'], message: 'The end must be after the start.' });
+    } else if (to - from > 100 * 24 * 60 * 60 * 1000) {
+      context.addIssue({ code: 'custom', path: ['to'], message: 'Choose a range of at most 100 days.' });
+    }
+  }),
 });
 
 export const updateBookingSchema = z.object({
